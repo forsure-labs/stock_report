@@ -93,20 +93,41 @@ jobs:
           print(f"지시문 렌더링 완료 → 산출물 경로: {out}")
           PY
 
-      # 토큰이 Secrets 에 실제로 들어있는지 먼저 본다 (값은 절대 찍지 않는다)
-      - name: 토큰 존재 확인
+      # 토큰 위생 검사 (값은 절대 찍지 않는다).
+      # 토큰에 줄바꿈/공백이 섞이면 인증이 조용히 실패하고, SDK 는 원인과 무관한
+      # AJV 스키마 에러로 즉시 죽는다 (is_error:true / num_turns:1 / cost:0).
+      # https://github.com/anthropics/claude-code-action/issues/872
+      - name: 토큰 위생 검사
         env:
           TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "::error::CLAUDE_CODE_OAUTH_TOKEN 이 비어 있습니다. Repository secrets 에 등록됐는지, 이름이 정확한지 확인하세요."
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN 이 비어 있습니다. Repository secrets 에 이름이 정확히 등록됐는지 확인하세요."
             exit 1
           fi
-          echo "토큰 있음 (길이: ${#TOKEN}자, 앞 12자: ${TOKEN:0:12}...)"
+
+          echo "길이: ${#TOKEN}자 / 앞 12자: ${TOKEN:0:12}..."
+
+          # 공백·줄바꿈·탭이 섞여 있으면 여기서 잡는다
           case "$TOKEN" in
-            sk-ant-oat*) echo "형식 OK — claude setup-token 토큰" ;;
-            sk-ant-api*) echo "::warning::이건 API 키입니다. claude_code_oauth_token 대신 anthropic_api_key 로 넘겨야 합니다." ;;
-            *) echo "::warning::예상 못 한 형식입니다. 토큰이 잘렸거나 다른 값일 수 있습니다." ;;
+            *[[:space:]]*)
+              echo "::error::토큰에 공백 또는 줄바꿈이 섞여 있습니다. 이게 인증 실패의 원인입니다."
+              echo "  Mac 에서 클립보드를 세탁한 뒤 Secret 을 다시 등록하세요:"
+              echo "    pbpaste | tr -d '[:space:]' | pbcopy"
+              exit 1
+              ;;
+          esac
+
+          case "$TOKEN" in
+            sk-ant-oat*) echo "형식 OK — claude setup-token 토큰, 공백 없음" ;;
+            sk-ant-api*)
+              echo "::error::이건 API 키입니다. 워크플로우 입력을 anthropic_api_key 로 바꿔야 합니다."
+              exit 1
+              ;;
+            *)
+              echo "::error::예상 못 한 형식입니다. 토큰이 잘렸거나 다른 값일 수 있습니다."
+              exit 1
+              ;;
           esac
 
       - name: Claude 리서치 실행
