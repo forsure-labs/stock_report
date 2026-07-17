@@ -106,7 +106,9 @@ jobs:
             exit 1
           fi
 
-          echo "길이: ${#TOKEN}자 / 앞 12자: ${TOKEN:0:12}..."
+          # 토큰의 일부라도 출력하지 않는다. GitHub 은 시크릿 전문만 마스킹하므로
+          # 부분 문자열은 공개 로그에 그대로 남는다.
+          echo "길이: ${#TOKEN}자"
 
           # 공백·줄바꿈·탭이 섞여 있으면 여기서 잡는다
           case "$TOKEN" in
@@ -134,8 +136,6 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # TODO: 원인 파악 후 제거 — 공개 저장소라 리포트 전문이 로그에 노출된다
-          show_full_output: true
           prompt: |
             리포지토리 루트의 `.claude-prompt.md` 파일을 읽고, 그 안의 지시문을 처음부터 끝까지 그대로 수행해라.
             지시문에 명시된 경로에 마크다운 리포트 파일을 저장하는 것이 이 작업의 최종 산출물이다.
