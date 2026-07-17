@@ -51,7 +51,16 @@ gh repo create stock-report --public --source=. --push
 > ⚠️ **Pages는 무료 계정에선 public 저장소만 됩니다.** private으로 두려면 GitHub Pro가 필요합니다.
 > 리포트를 공개하고 싶지 않다면 아래 "비공개로 쓰기"를 보세요.
 
-### 2. Claude OAuth 토큰 발급
+### 2. Claude GitHub App 설치 ⚠️ 필수
+
+https://github.com/apps/claude → **Install** → 이 저장소 선택.
+
+빠뜨리면 워크플로우가 이 에러로 실패합니다:
+`Claude Code is not installed on this repository`
+
+`github_token` 으로 우회할 수 없습니다. App 설치가 필수입니다.
+
+### 3. Claude OAuth 토큰 발급
 
 로컬 터미널에서:
 
@@ -61,28 +70,35 @@ claude setup-token
 
 Claude 구독 계정으로 로그인하면 장기 토큰이 출력됩니다. 이 값을 복사해두세요.
 
-### 3. 텔레그램 봇 준비
+### 4. 텔레그램 봇 준비
 
 1. 텔레그램에서 **@BotFather** 에게 `/newbot` → 봇 이름 지정 → **봇 토큰** 수령
-2. 만든 봇과 대화를 시작하고 아무 메시지나 전송
+2. 만든 봇과 대화를 **먼저 시작**하고 아무 메시지나 전송 (이걸 해야 채팅 ID가 잡힙니다)
 3. 채팅 ID 확인:
    ```bash
-   curl "https://api.telegram.org/bot<봇토큰>/getUpdates" | grep -o '"id":[0-9-]*' | head -1
+   curl -s "https://api.telegram.org/bot<봇토큰>/getUpdates" \
+     | python3 -c "import sys,json; [print(u['message']['chat']['id']) for u in json.load(sys.stdin)['result'] if 'message' in u]"
    ```
+   결과가 비어 있으면 2번을 안 한 것. 그룹으로 받으려면 봇을 그룹에 초대 후 같은 방법 (ID가 `-100…` 으로 시작).
 
-### 4. GitHub Secrets 등록
+### 5. GitHub Secrets 등록
+
+저장소 **Settings → Secrets and variables → Actions → Repository secrets** 에 등록합니다.
+(위쪽 *Environment secrets* 아님 — `report` 잡에서 안 보입니다.)
+
+CLI로 하려면:
 
 ```bash
-gh secret set CLAUDE_CODE_OAUTH_TOKEN   # 2번에서 받은 토큰
-gh secret set TELEGRAM_BOT_TOKEN        # 3번 봇 토큰
-gh secret set TELEGRAM_CHAT_ID          # 3번 채팅 ID
+gh secret set CLAUDE_CODE_OAUTH_TOKEN   # 3번에서 받은 토큰
+gh secret set TELEGRAM_BOT_TOKEN        # 4번 봇 토큰
+gh secret set TELEGRAM_CHAT_ID          # 4번 채팅 ID
 ```
 
-### 5. GitHub Pages 켜기
+### 6. GitHub Pages 켜기
 
 저장소 **Settings → Pages → Source** 를 **GitHub Actions** 로 지정합니다.
 
-### 6. 테스트 실행
+### 7. 테스트 실행
 
 ```bash
 gh workflow run "데일리 종목 리포트" -f ticker=ABSI
