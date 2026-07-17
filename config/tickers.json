@@ -1,0 +1,12 @@
+{
+  "tickers": [
+    {
+      "ticker": "ABSI",
+      "company": "Absci Corporation",
+      "sector": "바이오 (임상단계 신약)",
+      "exchange": "NASDAQ",
+      "currency": "미국 / USD",
+      "enabled": true
+    }
+  ]
+}

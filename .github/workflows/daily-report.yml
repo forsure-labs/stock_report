@@ -1,0 +1,223 @@
+name: 데일리 종목 리포트
+
+on:
+  schedule:
+    # 22:00 UTC = 07:00 KST (다음날). 월~금 UTC = 화~토 07:00 KST → 미국장 마감 다음 아침.
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: "특정 티커만 실행 (비워두면 tickers.json 전체)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-report
+  cancel-in-progress: false
+
+jobs:
+  # ── 1. tickers.json 을 읽어 매트릭스로 변환 ────────────────────────────
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.load.outputs.matrix }}
+      date: ${{ steps.load.outputs.date }}
+      weekday: ${{ steps.load.outputs.weekday }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: load
+        name: 종목 목록 및 KST 날짜 계산
+        env:
+          ONLY: ${{ inputs.ticker }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          from datetime import datetime, timedelta, timezone
+
+          KST = timezone(timedelta(hours=9))
+          now = datetime.now(KST)
+          weekday = "월화수목금토일"[now.weekday()] + "요일"
+
+          cfg = json.load(open("config/tickers.json", encoding="utf-8"))
+          rows = [t for t in cfg["tickers"] if t.get("enabled", True)]
+
+          only = os.environ.get("ONLY", "").strip().upper()
+          if only:
+              rows = [t for t in rows if t["ticker"].upper() == only]
+          if not rows:
+              raise SystemExit(f"실행할 종목이 없습니다 (필터: {only or '없음'})")
+
+          print("matrix=" + json.dumps({"include": rows}))
+          print("date=" + now.strftime("%Y-%m-%d"))
+          print("weekday=" + weekday)
+          PY
+
+  # ── 2. 종목별 리포트 생성 (병렬) ──────────────────────────────────────
+  report:
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.config.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 지시문 렌더링
+        env:
+          TICKER: ${{ matrix.ticker }}
+          COMPANY: ${{ matrix.company }}
+          SECTOR: ${{ matrix.sector }}
+          EXCHANGE: ${{ matrix.exchange }}
+          CURRENCY: ${{ matrix.currency }}
+          DATE: ${{ needs.config.outputs.date }}
+          WEEKDAY: ${{ needs.config.outputs.weekday }}
+        run: |
+          mkdir -p "reports/${TICKER}"
+          python3 - <<'PY'
+          import os, pathlib
+          tpl = pathlib.Path("prompts/daily-report.md").read_text(encoding="utf-8")
+          keys = ["TICKER", "COMPANY", "SECTOR", "EXCHANGE", "CURRENCY", "DATE", "WEEKDAY"]
+          out = f"reports/{os.environ['TICKER']}/{os.environ['DATE']}.md"
+          for k in keys:
+              tpl = tpl.replace("{{" + k + "}}", os.environ[k])
+          tpl = tpl.replace("{{OUTPUT_PATH}}", out)
+          pathlib.Path(".claude-prompt.md").write_text(tpl, encoding="utf-8")
+          print(f"지시문 렌더링 완료 → 산출물 경로: {out}")
+          PY
+
+      - name: Claude 리서치 실행
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            리포지토리 루트의 `.claude-prompt.md` 파일을 읽고, 그 안의 지시문을 처음부터 끝까지 그대로 수행해라.
+            지시문에 명시된 경로에 마크다운 리포트 파일을 저장하는 것이 이 작업의 최종 산출물이다.
+          claude_args: |
+            --allowedTools "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task,Bash(mkdir:*),Bash(ls:*)"
+            --permission-mode acceptEdits
+            --model claude-opus-4-8
+            --max-turns 120
+
+      - name: 산출물 검증
+        env:
+          REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
+        run: |
+          if [ ! -s "$REPORT" ]; then
+            echo "::error::리포트가 생성되지 않았습니다: $REPORT"
+            ls -laR reports/ || true
+            exit 1
+          fi
+          # 최소 분량 확인 — 빈 껍데기 리포트가 배포되는 걸 막는다
+          lines=$(wc -l < "$REPORT")
+          echo "리포트 생성됨: $REPORT ($lines 줄)"
+          [ "$lines" -ge 40 ] || { echo "::error::리포트가 너무 짧습니다 ($lines 줄)"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.ticker }}
+          path: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
+          retention-days: 7
+
+  # ── 3. 커밋 · Pages 배포 · 텔레그램 전송 ──────────────────────────────
+  publish:
+    needs: [config, report]
+    if: always() && needs.config.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # merge-multiple 을 쓰지 않는다: 아티팩트 내부 경로는 평평해지므로
+      # 티커 정보가 아티팩트 이름(report-{티커})에만 남는다.
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          pattern: report-*
+
+      - name: 리포트 수집
+        id: collect
+        run: |
+          count=0
+          for dir in /tmp/artifacts/report-*/; do
+            [ -d "$dir" ] || continue
+            ticker=$(basename "$dir")
+            ticker=${ticker#report-}
+            mkdir -p "reports/${ticker}"
+            for md in "$dir"*.md; do
+              [ -f "$md" ] || continue
+              cp -f "$md" "reports/${ticker}/"
+              echo "  수집: reports/${ticker}/$(basename "$md")"
+              count=$((count + 1))
+            done
+          done
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "이번 실행에서 생성된 리포트: ${count}개"
+
+      - uses: actions/setup-python@v5
+        if: steps.collect.outputs.count != '0'
+        with:
+          python-version: "3.12"
+
+      - name: HTML 렌더링
+        if: steps.collect.outputs.count != '0'
+        run: |
+          pip install --quiet markdown
+          python scripts/render.py
+
+      - name: 리포트 커밋
+        if: steps.collect.outputs.count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git diff --staged --quiet || git commit -m "리포트 ${{ needs.config.outputs.date }}"
+          git push
+
+      - uses: actions/configure-pages@v5
+        if: steps.collect.outputs.count != '0'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.collect.outputs.count != '0'
+        with:
+          path: site
+
+      - id: deploy
+        if: steps.collect.outputs.count != '0'
+        uses: actions/deploy-pages@v4
+
+      - name: 텔레그램 전송
+        if: steps.collect.outputs.count != '0'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+          DATE: ${{ needs.config.outputs.date }}
+        run: |
+          for dir in /tmp/artifacts/report-*/; do
+            [ -d "$dir" ] || continue
+            ticker=$(basename "$dir")
+            ticker=${ticker#report-}
+            python scripts/notify.py \
+              --report "reports/${ticker}/${DATE}.md" \
+              --url "${PAGE_URL%/}/${ticker}/${DATE}.html"
+          done
+
+      - name: 실패 알림
+        if: needs.report.result != 'success'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/notify.py \
+            --failure "${{ needs.config.outputs.date }} 리포트 중 일부 또는 전체가 생성되지 않았습니다." \
+            --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
