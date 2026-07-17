@@ -93,10 +93,28 @@ jobs:
           print(f"지시문 렌더링 완료 → 산출물 경로: {out}")
           PY
 
+      # 토큰이 Secrets 에 실제로 들어있는지 먼저 본다 (값은 절대 찍지 않는다)
+      - name: 토큰 존재 확인
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN 이 비어 있습니다. Repository secrets 에 등록됐는지, 이름이 정확한지 확인하세요."
+            exit 1
+          fi
+          echo "토큰 있음 (길이: ${#TOKEN}자, 앞 12자: ${TOKEN:0:12}...)"
+          case "$TOKEN" in
+            sk-ant-oat*) echo "형식 OK — claude setup-token 토큰" ;;
+            sk-ant-api*) echo "::warning::이건 API 키입니다. claude_code_oauth_token 대신 anthropic_api_key 로 넘겨야 합니다." ;;
+            *) echo "::warning::예상 못 한 형식입니다. 토큰이 잘렸거나 다른 값일 수 있습니다." ;;
+          esac
+
       - name: Claude 리서치 실행
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # TODO: 원인 파악 후 제거 — 공개 저장소라 리포트 전문이 로그에 노출된다
+          show_full_output: true
           prompt: |
             리포지토리 루트의 `.claude-prompt.md` 파일을 읽고, 그 안의 지시문을 처음부터 끝까지 그대로 수행해라.
             지시문에 명시된 경로에 마크다운 리포트 파일을 저장하는 것이 이 작업의 최종 산출물이다.
