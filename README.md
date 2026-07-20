@@ -92,7 +92,11 @@ CLI로 하려면:
 gh secret set CLAUDE_CODE_OAUTH_TOKEN   # 3번에서 받은 토큰
 gh secret set TELEGRAM_BOT_TOKEN        # 4번 봇 토큰
 gh secret set TELEGRAM_CHAT_ID          # 4번 채팅 ID
+gh secret set FRED_API_KEY              # (선택) 기준금리 수집용 — 없으면 Claude 가 대신 확인
 ```
+
+> `FRED_API_KEY` 는 선택입니다. [FRED](https://fredaccount.stlouisfed.org/apikey) 에서 무료 발급.
+> 없으면 fetcher 는 국채 수익률만 채우고 기준금리는 `null` 로 두며, Claude 가 웹서치로 보완합니다.
 
 ### 6. GitHub Pages 켜기
 
@@ -124,6 +128,8 @@ gh run watch
 
 - `enabled: false` — 삭제하지 않고 잠시 끌 때
 - `sector` 문구가 리포트 6·7번 섹터 모듈(바이오 = 임상/FDA, 원전 = NRC/DOE/PPA)을 결정합니다
+- `sector_etf`(선택, 예: `["XBI","IBB"]`) — 섹션 9 섹터 지수용 ETF. 없으면 `sector` 문구로 자동 추정
+- `cik`(선택) — SEC 조회용. 없으면 티커로 자동 해석
 - 종목은 최대 2개씩 병렬로 돕니다 (`max-parallel`)
 
 ---
@@ -135,6 +141,7 @@ gh run watch
 | `.github/workflows/daily-report.yml` | 스케줄·리서치·배포·전송 전체 파이프라인 |
 | `config/tickers.json` | 종목 목록 (**여기만 고치면 됨**) |
 | `prompts/daily-report.md` | 리포트 지시문 + 9개 섹션 출력 템플릿 |
+| `scripts/fetch.py` | 사전 데이터 수집 (주가·내부자거래·금리·섹터지수 → `.data.json`) |
 | `scripts/render.py` | md → HTML 렌더링, 목록 페이지 생성 |
 | `scripts/notify.py` | 요약 추출 + 텔레그램 전송 |
 | `reports/{티커}/{날짜}.md` | 생성된 마크다운 리포트 (자동 커밋, 아카이브) |

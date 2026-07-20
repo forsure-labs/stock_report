@@ -85,10 +85,12 @@ jobs:
           import os, pathlib
           tpl = pathlib.Path("prompts/daily-report.md").read_text(encoding="utf-8")
           keys = ["TICKER", "COMPANY", "SECTOR", "EXCHANGE", "CURRENCY", "DATE", "WEEKDAY"]
-          out = f"reports/{os.environ['TICKER']}/{os.environ['DATE']}.md"
+          base = f"reports/{os.environ['TICKER']}/{os.environ['DATE']}"
+          out = f"{base}.md"
           for k in keys:
               tpl = tpl.replace("{{" + k + "}}", os.environ[k])
           tpl = tpl.replace("{{OUTPUT_PATH}}", out)
+          tpl = tpl.replace("{{DATA_PATH}}", f"{base}.data.json")
           pathlib.Path(".claude-prompt.md").write_text(tpl, encoding="utf-8")
           print(f"지시문 렌더링 완료 → 산출물 경로: {out}")
           PY
@@ -131,6 +133,26 @@ jobs:
               exit 1
               ;;
           esac
+
+      # 사전 데이터 수집 (fetcher).
+      # 순수 조회값(주가·내부자거래·금리·섹터지수)을 API 에서 결정론적으로 받아
+      # reports/{티커}/{날짜}.data.json 으로 떨군다. Claude 는 이 숫자를 '확정 사실'로
+      # 쓰고 재검색하지 않는다 → 숫자 환각 제거 + 토큰 절감.
+      # fetcher 가 일부 실패해도 워크플로우는 계속한다(null 로 표기되고 Claude 가 보완).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 데이터 수집 (fetcher)
+        continue-on-error: true
+        env:
+          TICKER: ${{ matrix.ticker }}
+          DATE: ${{ needs.config.outputs.date }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          pip install --quiet yfinance
+          python scripts/fetch.py --ticker "$TICKER" --date "$DATE" \
+            --out "reports/${TICKER}/${DATE}.data.json"
 
       - name: Claude 리서치 실행
         uses: anthropics/claude-code-action@v1
