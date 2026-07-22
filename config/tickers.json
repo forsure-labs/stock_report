@@ -7,6 +7,15 @@
       "exchange": "NASDAQ",
       "currency": "미국 / USD",
       "enabled": true
+    },
+    {
+      "ticker": "OKLO",
+      "company": "Oklo Inc.",
+      "sector": "원전 (SMR)",
+      "exchange": "NYSE",
+      "currency": "미국 / USD",
+      "sector_etf": ["NLR", "URA"],
+      "enabled": true
     }
   ]
 }
