@@ -155,12 +155,46 @@ jobs:
             --out "reports/${TICKER}/${DATE}.data.json"
 
       - name: Claude 리서치 실행
+        id: claude1
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             리포지토리 루트의 `.claude-prompt.md` 파일을 읽고, 그 안의 지시문을 처음부터 끝까지 그대로 수행해라.
-            지시문에 명시된 경로에 마크다운 리포트 파일을 저장하는 것이 이 작업의 최종 산출물이다.
+            리포트는 반드시 **Write 툴로 파일 저장**해야 한다. 본문을 채팅(최종 메시지)으로만
+            출력하고 끝내면 실패다 — 파일이 생성되지 않는다.
+            저장 직후 `ls -la` 로 파일이 실제로 존재하는지 확인하고, 없으면 다시 저장하라.
+          claude_args: |
+            --allowedTools "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task,Bash(mkdir:*),Bash(ls:*)"
+            --permission-mode acceptEdits
+            --model claude-opus-4-8
+            --max-turns 120
+
+      # 모델이 Write 를 건너뛰면(비결정적) 파일이 안 생긴다. 그 경우만 1회 재시도한다.
+      # 재시도도 데이터 수집(fetcher)은 이미 끝났으므로 리서치·저장만 다시 한다.
+      - name: 저장 여부 확인
+        id: check
+        env:
+          REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
+        run: |
+          if [ -s "$REPORT" ]; then
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            echo "1차 실행에서 리포트 생성됨: $REPORT"
+          else
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::1차에서 리포트 미생성(모델이 Write 생략 추정) — 재시도한다: $REPORT"
+          fi
+
+      - name: Claude 리서치 재시도
+        if: steps.check.outputs.missing == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            `.claude-prompt.md` 의 지시문을 수행해 리포트를 완성해라.
+            ⚠️ 직전 시도에서 리포트 파일이 저장되지 않았다. 이번에는 **가장 먼저** 지시문에 명시된
+            경로에 Write 툴로 파일을 만들고, 리서치 결과로 채워 넣어라. 마지막에 반드시 `ls -la` 로
+            파일 존재를 확인하라. 리포트를 채팅으로만 출력하는 것은 실패다.
           claude_args: |
             --allowedTools "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task,Bash(mkdir:*),Bash(ls:*)"
             --permission-mode acceptEdits
