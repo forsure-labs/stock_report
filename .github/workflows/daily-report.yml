@@ -177,12 +177,14 @@ jobs:
         env:
           REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
         run: |
-          if [ -s "$REPORT" ]; then
+          # 파일 없음 + 껍데기(40줄 미만) 둘 다 재시도 대상으로 본다.
+          lines=$([ -f "$REPORT" ] && wc -l < "$REPORT" || echo 0)
+          if [ "$lines" -ge 40 ]; then
             echo "missing=false" >> "$GITHUB_OUTPUT"
-            echo "1차 실행에서 리포트 생성됨: $REPORT"
+            echo "1차 실행에서 리포트 생성됨: $REPORT ($lines 줄)"
           else
             echo "missing=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::1차에서 리포트 미생성(모델이 Write 생략 추정) — 재시도한다: $REPORT"
+            echo "::warning::1차 리포트 없음/너무 짧음($lines 줄, 모델이 Write 생략·미완성 추정) — 재시도한다: $REPORT"
           fi
 
       - name: Claude 리서치 재시도
@@ -191,10 +193,12 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            `.claude-prompt.md` 의 지시문을 수행해 리포트를 완성해라.
-            ⚠️ 직전 시도에서 리포트 파일이 저장되지 않았다. 이번에는 **가장 먼저** 지시문에 명시된
-            경로에 Write 툴로 파일을 만들고, 리서치 결과로 채워 넣어라. 마지막에 반드시 `ls -la` 로
-            파일 존재를 확인하라. 리포트를 채팅으로만 출력하는 것은 실패다.
+            `.claude-prompt.md` 의 지시문을 처음부터 끝까지 다시 수행해 리포트를 완성해라.
+            ⚠️ 직전 시도의 결과물이 없거나 빈 껍데기였다. 이번에는 리서치를 모두 마친 뒤
+            **9개 섹션을 전부 채운 완성 리포트**를 Write 툴로 지시문의 경로에 저장해라.
+            빈 골격이나 일부만 채운 파일을 저장하지 마라. 기존 파일이 있으면 완성본으로 덮어써라.
+            저장 후 Read 로 9개 섹션이 모두 있고 충분히 긴지 확인하고, 부족하면 다시 저장하라.
+            리포트를 채팅으로만 출력하는 것은 실패다.
           claude_args: |
             --allowedTools "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task,Bash(mkdir:*),Bash(ls:*)"
             --permission-mode acceptEdits
