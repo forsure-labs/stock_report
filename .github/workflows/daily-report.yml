@@ -154,56 +154,73 @@ jobs:
           python scripts/fetch.py --ticker "$TICKER" --date "$DATE" \
             --out "reports/${TICKER}/${DATE}.data.json"
 
+      # 모델의 Write 호출은 비결정적이라 신뢰하지 않는다. --json-schema 로 리포트를
+      # report_markdown 필드로 강제 반환시키고, 저장은 워크플로우가 결정론적으로 한다.
       - name: Claude 리서치 실행
         id: claude1
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            리포지토리 루트의 `.claude-prompt.md` 파일을 읽고, 그 안의 지시문을 처음부터 끝까지 그대로 수행해라.
-            리포트는 반드시 **Write 툴로 파일 저장**해야 한다. 본문을 채팅(최종 메시지)으로만
-            출력하고 끝내면 실패다 — 파일이 생성되지 않는다.
-            저장 직후 `ls -la` 로 파일이 실제로 존재하는지 확인하고, 없으면 다시 저장하라.
+            리포지토리 루트의 `.claude-prompt.md` 를 읽고 그 지시문대로 리포트를 작성해라.
+            ⚠️ 파일을 직접 저장하지 마라(저장은 워크플로우가 한다). 완성된 리포트 마크다운
+            전체를 structured output 의 `report_markdown` 필드로 반환해라.
+            9개 섹션 + 🎯 오늘의 한 줄 + 데이터 출처를 전부 담아라. 일부만 담으면 실패다.
           claude_args: |
-            --allowedTools "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task,Bash(mkdir:*),Bash(ls:*)"
-            --permission-mode acceptEdits
+            --allowedTools "WebSearch,WebFetch,Read,Glob,Grep,Task,Bash(ls:*)"
             --model claude-opus-4-8
             --max-turns 120
+            --json-schema '{"type":"object","properties":{"report_markdown":{"type":"string","description":"완성된 데일리 리포트 전체 (마크다운, 9개 섹션+오늘의 한 줄+출처)"}},"required":["report_markdown"]}'
 
-      # 모델이 Write 를 건너뛰면(비결정적) 파일이 안 생긴다. 그 경우만 1회 재시도한다.
-      # 재시도도 데이터 수집(fetcher)은 이미 끝났으므로 리서치·저장만 다시 한다.
+      - name: 리포트 저장 (구조화 출력 → 파일)
+        env:
+          SO: ${{ steps.claude1.outputs.structured_output }}
+          REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
+        run: |
+          mkdir -p "$(dirname "$REPORT")"
+          printf '%s' "$SO" | jq -r '.report_markdown // empty' > "$REPORT" || true
+          echo "저장 결과: $REPORT ($([ -f "$REPORT" ] && wc -l < "$REPORT" || echo 0) 줄)"
+
+      # 스키마 반환 실패 등으로 비었으면 1회 재시도. fetcher 는 재수집하지 않는다.
       - name: 저장 여부 확인
         id: check
         env:
           REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
         run: |
-          # 파일 없음 + 껍데기(40줄 미만) 둘 다 재시도 대상으로 본다.
           lines=$([ -f "$REPORT" ] && wc -l < "$REPORT" || echo 0)
           if [ "$lines" -ge 40 ]; then
             echo "missing=false" >> "$GITHUB_OUTPUT"
-            echo "1차 실행에서 리포트 생성됨: $REPORT ($lines 줄)"
+            echo "리포트 생성됨: $REPORT ($lines 줄)"
           else
             echo "missing=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::1차 리포트 없음/너무 짧음($lines 줄, 모델이 Write 생략·미완성 추정) — 재시도한다: $REPORT"
+            echo "::warning::리포트 없음/너무 짧음($lines 줄) — 재시도한다: $REPORT"
           fi
 
       - name: Claude 리서치 재시도
+        id: claude2
         if: steps.check.outputs.missing == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            `.claude-prompt.md` 의 지시문을 처음부터 끝까지 다시 수행해 리포트를 완성해라.
-            ⚠️ 직전 시도의 결과물이 없거나 빈 껍데기였다. 이번에는 리서치를 모두 마친 뒤
-            **9개 섹션을 전부 채운 완성 리포트**를 Write 툴로 지시문의 경로에 저장해라.
-            빈 골격이나 일부만 채운 파일을 저장하지 마라. 기존 파일이 있으면 완성본으로 덮어써라.
-            저장 후 Read 로 9개 섹션이 모두 있고 충분히 긴지 확인하고, 부족하면 다시 저장하라.
-            리포트를 채팅으로만 출력하는 것은 실패다.
+            `.claude-prompt.md` 의 지시문대로 리포트를 완성해라.
+            ⚠️ 직전 시도의 결과가 비었다. 9개 섹션을 전부 채운 완성 리포트 마크다운 전체를
+            structured output 의 `report_markdown` 필드로 반환해라. 일부만 담으면 실패다.
           claude_args: |
-            --allowedTools "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep,Task,Bash(mkdir:*),Bash(ls:*)"
-            --permission-mode acceptEdits
+            --allowedTools "WebSearch,WebFetch,Read,Glob,Grep,Task,Bash(ls:*)"
             --model claude-opus-4-8
             --max-turns 120
+            --json-schema '{"type":"object","properties":{"report_markdown":{"type":"string"}},"required":["report_markdown"]}'
+
+      - name: 재시도 결과 저장
+        if: steps.check.outputs.missing == 'true'
+        env:
+          SO: ${{ steps.claude2.outputs.structured_output }}
+          REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
+        run: |
+          mkdir -p "$(dirname "$REPORT")"
+          printf '%s' "$SO" | jq -r '.report_markdown // empty' > "$REPORT" || true
+          echo "재시도 저장 결과: $REPORT ($([ -f "$REPORT" ] && wc -l < "$REPORT" || echo 0) 줄)"
 
       - name: 산출물 검증
         env:
