@@ -154,32 +154,49 @@ jobs:
           python scripts/fetch.py --ticker "$TICKER" --date "$DATE" \
             --out "reports/${TICKER}/${DATE}.data.json"
 
-      # 모델의 Write 호출은 비결정적이라 신뢰하지 않는다. --json-schema 로 리포트를
-      # report_markdown 필드로 강제 반환시키고, 저장은 워크플로우가 결정론적으로 한다.
+      # 저장은 워크플로우가 결정론적으로 한다(--json-schema 의 report_markdown).
+      # 다만 모델이 마지막 턴에서 구조화 출력 도구를 호출하지 않으면 액션이 그대로
+      # 죽으므로("did not return structured_output"), 모델에게 파일 저장도 함께
+      # 시켜 백업 경로를 둔다. 둘 중 하나만 성공해도 리포트는 건진다.
+      #
+      # continue-on-error 필수: 이게 없으면 액션 실패 = job 중단이라
+      # 아래 재시도 로직이 영영 실행되지 않는다.
       - name: Claude 리서치 실행
         id: claude1
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             리포지토리 루트의 `.claude-prompt.md` 를 읽고 그 지시문대로 리포트를 작성해라.
-            ⚠️ 파일을 직접 저장하지 마라(저장은 워크플로우가 한다). 완성된 리포트 마크다운
-            전체를 structured output 의 `report_markdown` 필드로 반환해라.
+            완성된 리포트는 **두 경로 모두**로 내보내라 (지시문 7번 참조):
+            ① `.claude-prompt.md` 에 적힌 저장 경로에 Write 로 저장,
+            ② 같은 내용 전체를 structured output 의 `report_markdown` 필드로 반환.
             9개 섹션 + 🎯 오늘의 한 줄 + 데이터 출처를 전부 담아라. 일부만 담으면 실패다.
           claude_args: |
-            --allowedTools "WebSearch,WebFetch,Read,Glob,Grep,Task,Bash(ls:*)"
+            --allowedTools "WebSearch,WebFetch,Read,Write,Glob,Grep,Task,Bash(ls:*)"
             --model claude-opus-4-8
             --max-turns 120
             --json-schema '{"type":"object","properties":{"report_markdown":{"type":"string","description":"완성된 데일리 리포트 전체 (마크다운, 9개 섹션+오늘의 한 줄+출처)"}},"required":["report_markdown"]}'
 
+      # 구조화 출력이 있으면 그걸로 덮고, 없으면 모델이 직접 쓴 파일을 그대로 둔다.
+      # $REPORT 로 바로 리다이렉트하면 안 된다 — SO 가 비었을 때 모델이 써 둔 파일을
+      # 0바이트로 날려버린다.
       - name: 리포트 저장 (구조화 출력 → 파일)
         env:
           SO: ${{ steps.claude1.outputs.structured_output }}
           REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
         run: |
           mkdir -p "$(dirname "$REPORT")"
-          printf '%s' "$SO" | jq -r '.report_markdown // empty' > "$REPORT" || true
-          echo "저장 결과: $REPORT ($([ -f "$REPORT" ] && wc -l < "$REPORT" || echo 0) 줄)"
+          printf '%s' "$SO" | jq -r '.report_markdown // empty' > /tmp/so.md 2>/dev/null || :
+          if [ -s /tmp/so.md ]; then
+            mv /tmp/so.md "$REPORT"
+            echo "구조화 출력에서 저장: $REPORT ($(wc -l < "$REPORT") 줄)"
+          elif [ -s "$REPORT" ]; then
+            echo "::warning::구조화 출력이 비었다 — 모델이 직접 저장한 파일을 사용한다 ($(wc -l < "$REPORT") 줄)"
+          else
+            echo "::warning::구조화 출력·파일 둘 다 없음 — 재시도로 넘긴다"
+          fi
 
       # 스키마 반환 실패 등으로 비었으면 1회 재시도. fetcher 는 재수집하지 않는다.
       - name: 저장 여부 확인
@@ -199,15 +216,18 @@ jobs:
       - name: Claude 리서치 재시도
         id: claude2
         if: steps.check.outputs.missing == 'true'
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             `.claude-prompt.md` 의 지시문대로 리포트를 완성해라.
-            ⚠️ 직전 시도의 결과가 비었다. 9개 섹션을 전부 채운 완성 리포트 마크다운 전체를
-            structured output 의 `report_markdown` 필드로 반환해라. 일부만 담으면 실패다.
+            ⚠️ 직전 시도의 결과가 비었다. 9개 섹션을 전부 채운 완성 리포트를
+            ① 지시문에 적힌 저장 경로에 Write 로 저장하고,
+            ② 같은 내용 전체를 structured output 의 `report_markdown` 필드로도 반환해라.
+            둘 중 하나라도 빠지거나 일부만 담으면 실패다.
           claude_args: |
-            --allowedTools "WebSearch,WebFetch,Read,Glob,Grep,Task,Bash(ls:*)"
+            --allowedTools "WebSearch,WebFetch,Read,Write,Glob,Grep,Task,Bash(ls:*)"
             --model claude-opus-4-8
             --max-turns 120
             --json-schema '{"type":"object","properties":{"report_markdown":{"type":"string"}},"required":["report_markdown"]}'
@@ -219,8 +239,15 @@ jobs:
           REPORT: reports/${{ matrix.ticker }}/${{ needs.config.outputs.date }}.md
         run: |
           mkdir -p "$(dirname "$REPORT")"
-          printf '%s' "$SO" | jq -r '.report_markdown // empty' > "$REPORT" || true
-          echo "재시도 저장 결과: $REPORT ($([ -f "$REPORT" ] && wc -l < "$REPORT" || echo 0) 줄)"
+          printf '%s' "$SO" | jq -r '.report_markdown // empty' > /tmp/so2.md 2>/dev/null || :
+          if [ -s /tmp/so2.md ]; then
+            mv /tmp/so2.md "$REPORT"
+            echo "재시도 — 구조화 출력에서 저장: $REPORT ($(wc -l < "$REPORT") 줄)"
+          elif [ -s "$REPORT" ]; then
+            echo "::warning::재시도 — 구조화 출력이 비었다. 모델이 직접 저장한 파일을 사용한다 ($(wc -l < "$REPORT") 줄)"
+          else
+            echo "::error::재시도도 실패 — 구조화 출력·파일 둘 다 없음"
+          fi
 
       - name: 산출물 검증
         env:
